@@ -1,73 +1,90 @@
 package bot
 
 import (
-	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/joho/godotenv"
 )
 
-var (
-	ChannelID = ""
-)
+var s *discordgo.Session
+var err error
 
-func Run() {
-	sess, err := discordgo.New("Bot " + os.Getenv("DISCORD_TOKEN"))
+func initEnv() {
+	path, err := os.Getwd()
 	if err != nil {
-		log.Fatalf("Error: %s", err.Error())
+		slog.Error("Error to load environment variables", "err", err)
 		return
 	}
-	sess.Identify.Intents = discordgo.IntentMessageContent
-	sess.Identify.Intents = discordgo.IntentsGuildMessages
-	sess.AddHandler(handlerCommands)
-	if err = sess.Open(); err != nil {
+	if err := godotenv.Load(path + "/.env"); err != nil {
+		slog.Error("Error to load environment variables", "err", err)
+		return
+	}
+}
+func init() {
+	initEnv()
+	var err error
+	s, err = discordgo.New("Bot " + os.Getenv("DISCORD_TOKEN"))
+	if err != nil {
+		log.Fatalf("Invalid bot parameters: %v", err)
+	}
+	s.Identify.Intents = discordgo.IntentMessageContent
+	s.Identify.Intents = discordgo.IntentsGuildMessages
+}
+
+var (
+	dmPermission                   = false
+	defaultMemberPermissions int64 = discordgo.PermissionManageServer
+	commands                       = []*discordgo.ApplicationCommand{
+		{
+			Name:        "basic-command",
+			Description: "Basic command",
+		},
+	}
+	commandHandlers = map[string]func(session *discordgo.Session, interaction *discordgo.InteractionCreate){
+		"basic-command": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+			s.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Hey there! Congratulations, you just executed your first slash command",
+				},
+			})
+		},
+	}
+)
+
+func init() {
+	s.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if handler, ok := commandHandlers[i.ApplicationCommandData().Name]; ok {
+			handler(s, i)
+		}
+	})
+}
+
+func Run() {
+	s.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		log.Printf("Logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
+	})
+	if err = s.Open(); err != nil {
 		log.Fatalf("Error message: %s", err.Error())
 		return
 	}
-	defer sess.Close()
-	fmt.Println("Bot running...")
+	defer s.Close()
+	log.Println("Adding commands...")
+	registeredCommands := make([]*discordgo.ApplicationCommand, len(commands))
+	for idx, command := range commands {
+		cmd, err := s.ApplicationCommandCreate(s.State.User.ID, command.GuildID, command)
+		if err != nil {
+			log.Panicf("Cannot create '%v' command: %v", command.Name, err)
+		}
+		registeredCommands[idx] = cmd
+	}
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-quit
-	switch {
-	case sig == os.Interrupt:
-		_, err := sess.ChannelMessageSend(ChannelID, "Haha até a próxima, 👋🏻🥸")
-		if err != nil {
-			fmt.Printf("err to shutdown: %s", err)
-		}
-		sess.Close()
-	}
+	<-quit
 
-}
-
-func handlerCommands(session *discordgo.Session, message *discordgo.MessageCreate) {
-	command := NewCommand(session, message)
-	ChannelID = message.ChannelID
-	if session.State.User.ID == message.Author.ID {
-		return
-	}
-	isValid := command.Validate(message.Content)
-	if !isValid {
-		session.ChannelMessageSend(message.ChannelID, "Comando inválido amigão. tente: `zilean !<comando>`")
-		return
-	}
-	switch {
-	case strings.Contains(message.Content, "on"):
-		members, err := command.MembersOnline()
-		if err != nil {
-			fmt.Printf("err: %s", err)
-		}
-		session.ChannelMessageSend(message.ChannelID, members)
-		return
-	case strings.Contains(message.Content, "commands"):
-		commands := command.ShowCommands()
-		session.ChannelMessageSend(message.ChannelID, commands)
-		return
-	default:
-		session.ChannelMessageSend(message.ChannelID, "Comando inválido amigão. tente: `zilean !<comando>")
-	}
 }
